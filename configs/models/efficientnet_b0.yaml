@@ -1,0 +1,16 @@
+model: efficientnet_b0
+validation_early_stopping: true
+params:
+  pretrained: true
+  # timm/efficientnet_b0.ra_in1k model.safetensors
+  weights_sha256: d569899762ea9b1384ee07f4af64805cf8caa1c55f9253ebb1080dc40e87a2cd
+  image_size: 224
+  batch_size: 16
+  max_epochs: 15
+  patience: 3
+  learning_rate: 3.0e-4
+  weight_decay: 1.0e-4
+  seed: 42
+  # Keeps a single training run inside the overall 3h CPU budget
+  # (5 folds + final model).
+  budget_seconds: 1700
