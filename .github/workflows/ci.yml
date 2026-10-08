@@ -21,8 +21,6 @@ jobs:
         run: |
           uv run ruff check src tests
           uv run ruff format --check src tests
-      - name: Type check
-        run: uv run mypy
       - name: Test
         run: uv run pytest -m "not ml"
 
@@ -37,5 +35,8 @@ jobs:
           python-version: "3.11"
       - name: Install dependencies
         run: uv sync --extra dev --extra ml
+      # mypy needs the ml dependencies installed to type-check the model code.
+      - name: Type check
+        run: uv run mypy
       - name: Heavy tests
         run: uv run pytest -m ml
