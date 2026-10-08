@@ -25,3 +25,17 @@ jobs:
         run: uv run mypy
       - name: Test
         run: uv run pytest -m "not ml"
+
+  ml-checks:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONHASHSEED: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: uv sync --extra dev --extra ml
+      - name: Heavy tests
+        run: uv run pytest -m ml
