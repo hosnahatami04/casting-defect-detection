@@ -1,0 +1,9 @@
+model: hog
+params:
+  image_size: 128
+  orientations: 9
+  pixels_per_cell: 8
+  cells_per_block: 2
+  c_grid: [0.01, 0.1, 1.0, 10.0]
+  inner_cv_folds: 3
+  seed: 42
