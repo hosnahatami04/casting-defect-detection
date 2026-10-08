@@ -33,6 +33,18 @@ class SplitConfig(BaseModel):
     n_folds: int = 5
 
 
+class CostsConfig(BaseModel):
+    escape: float = 20.0
+    false_reject: float = 1.0
+    manual_review: float = 0.5
+
+
+class DecisionConfig(BaseModel):
+    recall_target: float = 0.99
+    max_escape: float = 0.005
+    costs: CostsConfig = CostsConfig()
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="CASTINSPECT_",
@@ -45,6 +57,7 @@ class Settings(BaseSettings):
     dataset: DatasetConfig = DatasetConfig()
     grouping: GroupingConfig = GroupingConfig()
     split: SplitConfig = SplitConfig()
+    decision: DecisionConfig = DecisionConfig()
 
 
 def load_settings(config_path: Path | None = None) -> Settings:

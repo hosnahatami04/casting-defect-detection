@@ -21,3 +21,15 @@ grouping:
 split:
   test_fraction: 0.2
   n_folds: 5
+
+decision:
+  # Share of defects that must be caught (rejected or sent to review).
+  recall_target: 0.99
+  # Highest tolerated share of defects passed automatically, on OOF.
+  max_escape: 0.005
+  # Relative costs: an escaped defect versus one wrongly rejected good part,
+  # and the cost of one manual inspection.
+  costs:
+    escape: 20.0
+    false_reject: 1.0
+    manual_review: 0.5

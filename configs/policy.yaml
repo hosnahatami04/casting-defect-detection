@@ -1,0 +1,9 @@
+version: '1'
+model: efficientnet_b0
+temperature: 1.4419631923071183
+thresholds:
+  review: 0.01668567470619234
+  reject: 0.2021719476695814
+recall_target: 0.99
+max_escape: 0.005
+oof_source: artifacts/oof/efficientnet_b0.parquet
