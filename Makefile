@@ -1,6 +1,6 @@
 export PYTHONHASHSEED := 0
 
-.PHONY: setup lint format typecheck test cov
+.PHONY: setup lint format typecheck test cov data
 
 setup:
 	uv sync --extra dev
@@ -21,3 +21,7 @@ test:
 
 cov:
 	uv run pytest -m "not ml" --cov --cov-report=term-missing
+
+data:
+	uv run castinspect acquire
+	uv run castinspect data

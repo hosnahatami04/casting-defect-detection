@@ -21,6 +21,11 @@ class PathsConfig(BaseModel):
 class DatasetConfig(BaseModel):
     # Pinned after the first manual download; empty means not recorded yet.
     archive_sha256: str = ""
+    allowed_modes: tuple[str, ...] = ("L",)
+
+
+class GroupingConfig(BaseModel):
+    dhash_threshold: int = 6
 
 
 class SplitConfig(BaseModel):
@@ -38,6 +43,7 @@ class Settings(BaseSettings):
     image_size: int = 512
     paths: PathsConfig = PathsConfig()
     dataset: DatasetConfig = DatasetConfig()
+    grouping: GroupingConfig = GroupingConfig()
     split: SplitConfig = SplitConfig()
 
 
