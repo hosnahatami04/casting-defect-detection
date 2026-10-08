@@ -172,43 +172,102 @@ def cv(
         Path | None, typer.Option(help="Dataset image root; defaults to a search in data_raw.")
     ] = None,
 ) -> None:
-    import importlib
-
-    import yaml
-
     from castinspect.evaluation.cv import oof_arrays, run_cross_validation, save_oof
     from castinspect.models.base import create_model
-
-    # Importing the model modules registers their factories.
-    for module in ("castinspect.models.hog", "castinspect.models.resnet"):
-        importlib.import_module(module)
 
     settings = load_settings(config)
     root = image_root or locate_image_root(settings.paths.data_raw)
     manifest = read_manifest(settings.paths.data_processed / "manifest.csv")
 
-    spec = yaml.safe_load(model_config.read_text(encoding="utf-8"))
-    name = spec["model"]
-    params = dict(spec.get("params") or {})
-    if "cache_dir" in params and params["cache_dir"] is not None:
-        params["cache_dir"] = Path(params["cache_dir"])
+    name, params, pass_validation = _load_model_spec(model_config)
     typer.echo(f"model: {name}; image root: {root}")
 
-    predictions = run_cross_validation(
+    result = run_cross_validation(
         lambda: create_model(name, **params),
         manifest,
         root,
         settings.split.n_folds,
+        pass_validation=pass_validation,
     )
     oof_path = settings.paths.artifacts / "oof" / f"{name}.parquet"
-    save_oof(predictions, oof_path)
+    save_oof(result.predictions, oof_path)
     typer.echo(f"out-of-fold predictions written to {oof_path}")
 
-    labels, probabilities, groups = oof_arrays(predictions)
+    if any(result.fit_infos):
+        info_path = settings.paths.artifacts / "oof" / f"{name}_fit_info.json"
+        info = {"folds": result.fit_infos, "fold_seconds": result.fold_seconds}
+        info_path.write_text(json.dumps(info, indent=2), encoding="utf-8")
+        typer.echo(f"fit details written to {info_path}")
+    typer.echo(f"fold wall times (s): {[round(s) for s in result.fold_seconds]}")
+
+    labels, probabilities, groups = oof_arrays(result.predictions)
     summary = _oof_summary(labels, probabilities, groups)
     metrics_path = settings.paths.artifacts / "oof" / f"{name}_metrics.json"
     metrics_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     typer.echo(json.dumps(summary, indent=2))
+
+
+def _load_model_spec(model_config: Path) -> tuple[str, dict[str, object], bool]:
+    import importlib
+
+    import yaml
+
+    # Importing the model modules registers their factories.
+    for module in (
+        "castinspect.models.hog",
+        "castinspect.models.resnet",
+        "castinspect.models.efficientnet",
+    ):
+        importlib.import_module(module)
+
+    spec = yaml.safe_load(model_config.read_text(encoding="utf-8"))
+    name = spec["model"]
+    params = dict(spec.get("params") or {})
+    if "cache_dir" in params and params["cache_dir"] is not None:
+        params["cache_dir"] = Path(str(params["cache_dir"]))
+    return name, params, bool(spec.get("validation_early_stopping", False))
+
+
+@app.command("train-final")
+def train_final(
+    model_config: Annotated[Path, typer.Argument(help="Model YAML under configs/models/.")],
+    config: ConfigOption = DEFAULT_CONFIG_PATH,
+    image_root: Annotated[
+        Path | None, typer.Option(help="Dataset image root; defaults to a search in data_raw.")
+    ] = None,
+) -> None:
+    """Train the final model on all development data, using the median
+    early-stopping epoch from the cross-validation run."""
+    import statistics
+    import time
+
+    from castinspect.data.dataset import LABEL_TO_INDEX
+    from castinspect.models.base import create_model
+
+    settings = load_settings(config)
+    root = image_root or locate_image_root(settings.paths.data_raw)
+    manifest = read_manifest(settings.paths.data_processed / "manifest.csv")
+    dev_rows = [row for row in manifest if row.split == "dev"]
+
+    name, params, _ = _load_model_spec(model_config)
+    info_path = settings.paths.artifacts / "oof" / f"{name}_fit_info.json"
+    fit_info = json.loads(info_path.read_text(encoding="utf-8"))
+    best_epochs = [fold["best_epoch"] for fold in fit_info["folds"]]
+    median_epochs = int(statistics.median(best_epochs))
+    typer.echo(f"fold best epochs: {best_epochs}; training final model for {median_epochs}")
+
+    params["epochs_override"] = median_epochs
+    model = create_model(name, **params)
+    started = time.perf_counter()
+    model.fit(
+        [root / row.path for row in dev_rows],
+        [LABEL_TO_INDEX[row.label] for row in dev_rows],
+    )
+    elapsed = time.perf_counter() - started
+    final_path = settings.paths.artifacts / "models" / f"{name}_final.pt"
+    model.save(final_path)
+    typer.echo(f"final model trained on {len(dev_rows)} images in {elapsed:.0f}s")
+    typer.echo(f"saved to {final_path}")
 
 
 def _oof_summary(
