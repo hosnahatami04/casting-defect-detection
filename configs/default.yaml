@@ -10,6 +10,13 @@ paths:
 dataset:
   # Recorded after the user places the dataset archive in data/raw (phase 1).
   archive_sha256: ""
+  # Files are grayscale content stored in RGB JPEG containers.
+  allowed_modes: [RGB]
+
+grouping:
+  # Hamming distance at or below this value marks a near-duplicate pair.
+  # Calibrated on the real distance distribution; see ADR 0003.
+  dhash_threshold: 3
 
 split:
   test_fraction: 0.2

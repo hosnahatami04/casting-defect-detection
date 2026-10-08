@@ -21,9 +21,9 @@ htmlcov/
 # Environment
 .env
 
-# Data and artifacts never enter version control
-data/
-artifacts/
+# Data and artifacts never enter version control (root directories only)
+/data/
+/artifacts/
 *.zip
 *.pt
 *.pth
