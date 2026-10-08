@@ -1,0 +1,16 @@
+seed: 42
+image_size: 512
+
+paths:
+  data_raw: data/raw
+  data_processed: data/processed
+  artifacts: artifacts
+  reports: reports
+
+dataset:
+  # Recorded after the user places the dataset archive in data/raw (phase 1).
+  archive_sha256: ""
+
+split:
+  test_fraction: 0.2
+  n_folds: 5
