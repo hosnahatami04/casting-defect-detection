@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.python-version-local
+
+# Tooling caches
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.hypothesis/
+.coverage
+coverage.xml
+htmlcov/
+
+# Environment
+.env
+
+# Data and artifacts never enter version control
+data/
+artifacts/
+*.zip
+*.pt
+*.pth
+*.onnx
+*.ckpt
+
+# Images are only allowed as committed report figures or test fixtures
+*.png
+*.jpg
+*.jpeg
+!reports/figures/**/*.png
+!reports/figures/**/*.jpg
+!tests/fixtures/**/*.png
+!tests/fixtures/**/*.jpg
+
+# Local documents and notes
+*.pdf
+
+# Torch hub / weights caches
+.torch/
+.cache/
