@@ -16,6 +16,7 @@ dependencies = [
     "pyyaml>=6.0",
     "pydantic>=2.7",
     "pydantic-settings>=2.4",
+    "scipy>=1.12",
     "typer>=0.12",
 ]
 
@@ -27,6 +28,7 @@ ml = [
     "scikit-image>=0.23",
     "scikit-learn>=1.4",
     "matplotlib>=3.8",
+    "pyarrow>=16",
 ]
 deploy = [
     "onnx>=1.16",
@@ -49,6 +51,16 @@ castinspect = "castinspect.cli:app"
 [tool.hatch.build.targets.wheel]
 packages = ["src/castinspect"]
 
+# CPU-only project: keep CI and deployments off the multi-gigabyte CUDA wheels.
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu" }]
+torchvision = [{ index = "pytorch-cpu" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"
@@ -62,6 +74,10 @@ strict = true
 files = ["src"]
 python_version = "3.11"
 plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["skimage.*", "sklearn.*", "pyarrow.*", "timm.*", "scipy.*", "torchvision.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -8,8 +8,8 @@ paths:
   reports: reports
 
 dataset:
-  # Recorded after the user places the dataset archive in data/raw (phase 1).
-  archive_sha256: ""
+  # Kaggle casting dataset archive, verified by castinspect acquire.
+  archive_sha256: a11236976a65d77edd41fa3f8a2803a583157bd7401efc5e7ef5532cf3a00437
   # Files are grayscale content stored in RGB JPEG containers.
   allowed_modes: [RGB]
 

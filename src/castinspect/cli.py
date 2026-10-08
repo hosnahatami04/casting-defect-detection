@@ -27,6 +27,7 @@ from castinspect.data.split import (
     ManifestRow,
     SplitAssignment,
     conflicting_pairs,
+    read_manifest,
     split_dataset,
     write_manifest,
 )
@@ -98,7 +99,7 @@ def data(
     ] = None,
 ) -> None:
     settings = load_settings(config)
-    root = image_root or locate_image_root(settings.paths.data_raw / "extracted")
+    root = image_root or locate_image_root(settings.paths.data_raw)
     typer.echo(f"image root: {root}")
 
     report = scan_dataset(root, settings.image_size, frozenset(settings.dataset.allowed_modes))
@@ -161,6 +162,99 @@ def data(
     calibration_path = settings.paths.reports / "interim" / "phash_calibration.md"
     _write_calibration_report(calibration_path, records, distances, group_ids, threshold)
     typer.echo(f"threshold calibration report written to {calibration_path}")
+
+
+@app.command()
+def cv(
+    model_config: Annotated[Path, typer.Argument(help="Model YAML under configs/models/.")],
+    config: ConfigOption = DEFAULT_CONFIG_PATH,
+    image_root: Annotated[
+        Path | None, typer.Option(help="Dataset image root; defaults to a search in data_raw.")
+    ] = None,
+) -> None:
+    import importlib
+
+    import yaml
+
+    from castinspect.evaluation.cv import oof_arrays, run_cross_validation, save_oof
+    from castinspect.models.base import create_model
+
+    # Importing the model modules registers their factories.
+    for module in ("castinspect.models.hog", "castinspect.models.resnet"):
+        importlib.import_module(module)
+
+    settings = load_settings(config)
+    root = image_root or locate_image_root(settings.paths.data_raw)
+    manifest = read_manifest(settings.paths.data_processed / "manifest.csv")
+
+    spec = yaml.safe_load(model_config.read_text(encoding="utf-8"))
+    name = spec["model"]
+    params = dict(spec.get("params") or {})
+    if "cache_dir" in params and params["cache_dir"] is not None:
+        params["cache_dir"] = Path(params["cache_dir"])
+    typer.echo(f"model: {name}; image root: {root}")
+
+    predictions = run_cross_validation(
+        lambda: create_model(name, **params),
+        manifest,
+        root,
+        settings.split.n_folds,
+    )
+    oof_path = settings.paths.artifacts / "oof" / f"{name}.parquet"
+    save_oof(predictions, oof_path)
+    typer.echo(f"out-of-fold predictions written to {oof_path}")
+
+    labels, probabilities, groups = oof_arrays(predictions)
+    summary = _oof_summary(labels, probabilities, groups)
+    metrics_path = settings.paths.artifacts / "oof" / f"{name}_metrics.json"
+    metrics_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    typer.echo(json.dumps(summary, indent=2))
+
+
+def _oof_summary(
+    labels: npt.NDArray[np.int64],
+    probabilities: npt.NDArray[np.float64],
+    groups: npt.NDArray[np.int64],
+) -> dict[str, object]:
+    from castinspect.evaluation.intervals import bootstrap_auroc, clopper_pearson
+    from castinspect.evaluation.metrics import (
+        confusion_at_threshold,
+        fpr_at_recall,
+        recall_at_fpr,
+        threshold_at_recall,
+    )
+
+    auroc_ci = bootstrap_auroc(labels, probabilities, groups)
+    recall_target = 0.99
+    threshold = threshold_at_recall(labels, probabilities, recall_target)
+    confusion = confusion_at_threshold(labels, probabilities, threshold)
+    defects = confusion.true_positive + confusion.false_negative
+    healthy = confusion.true_negative + confusion.false_positive
+    caught = clopper_pearson(confusion.true_positive, defects)
+    rejected_ok = clopper_pearson(confusion.false_positive, healthy)
+    return {
+        "n": len(labels),
+        "n_defect": int(defects),
+        "n_ok": int(healthy),
+        "auroc": {"point": auroc_ci.point, "lower": auroc_ci.lower, "upper": auroc_ci.upper},
+        "recall_at_5pct_fpr": recall_at_fpr(labels, probabilities, 0.05),
+        "fpr_at_99pct_recall": fpr_at_recall(labels, probabilities, recall_target),
+        "operating_point_at_99pct_recall": {
+            "threshold": threshold,
+            "defect_recall": {
+                "point": caught.point,
+                "lower": caught.lower,
+                "upper": caught.upper,
+                "raw": f"{confusion.true_positive}/{defects}",
+            },
+            "false_reject_rate": {
+                "point": rejected_ok.point,
+                "lower": rejected_ok.lower,
+                "upper": rejected_ok.upper,
+                "raw": f"{confusion.false_positive}/{healthy}",
+            },
+        },
+    }
 
 
 def _split_stats(

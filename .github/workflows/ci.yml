@@ -21,7 +21,22 @@ jobs:
         run: |
           uv run ruff check src tests
           uv run ruff format --check src tests
-      - name: Type check
-        run: uv run mypy
       - name: Test
         run: uv run pytest -m "not ml"
+
+  ml-checks:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONHASHSEED: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: uv sync --extra dev --extra ml
+      # mypy needs the ml dependencies installed to type-check the model code.
+      - name: Type check
+        run: uv run mypy
+      - name: Heavy tests
+        run: uv run pytest -m ml
