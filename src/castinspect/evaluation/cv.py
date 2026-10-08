@@ -1,8 +1,9 @@
 import logging
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -23,16 +24,29 @@ class OofPrediction:
     probability: float
 
 
+@dataclass(frozen=True)
+class CvResult:
+    predictions: list[OofPrediction]
+    fit_infos: list[dict[str, Any]] = field(default_factory=list)
+    fold_seconds: list[float] = field(default_factory=list)
+
+
 def run_cross_validation(
     factory: ModelFactory,
     manifest_rows: Sequence[ManifestRow],
     image_root: Path,
     n_folds: int,
-) -> list[OofPrediction]:
+    pass_validation: bool = False,
+) -> CvResult:
+    """With pass_validation, each model receives the held-out fold for early
+    stopping. The resulting out-of-fold scores are then mildly optimistic
+    (epoch selection saw the fold); the untouched test split settles it."""
     dev_rows = [row for row in manifest_rows if row.split == "dev"]
     if not dev_rows:
         raise ValueError("manifest contains no development rows")
     predictions: list[OofPrediction] = []
+    fit_infos: list[dict[str, Any]] = []
+    fold_seconds: list[float] = []
     for fold in range(n_folds):
         train_rows = [row for row in dev_rows if row.fold != fold]
         held_out = [row for row in dev_rows if row.fold == fold]
@@ -40,17 +54,30 @@ def run_cross_validation(
             raise ValueError(f"fold {fold} is empty")
         model = factory()
         started = time.perf_counter()
-        model.fit(
-            [image_root / row.path for row in train_rows],
-            [LABEL_TO_INDEX[row.label] for row in train_rows],
-        )
-        probabilities = model.predict_proba([image_root / row.path for row in held_out])
+        train_paths = [image_root / row.path for row in train_rows]
+        train_labels = [LABEL_TO_INDEX[row.label] for row in train_rows]
+        held_out_paths = [image_root / row.path for row in held_out]
+        if pass_validation:
+            # The protocol does not know about validation kwargs; models that
+            # opt in (validation_early_stopping in their config) accept them.
+            cast(Any, model).fit(
+                train_paths,
+                train_labels,
+                val_paths=held_out_paths,
+                val_labels=[LABEL_TO_INDEX[row.label] for row in held_out],
+            )
+        else:
+            model.fit(train_paths, train_labels)
+        probabilities = model.predict_proba(held_out_paths)
+        elapsed = time.perf_counter() - started
+        fold_seconds.append(elapsed)
+        fit_infos.append(dict(getattr(model, "fit_info", {})))
         logger.info(
             "fold %d: trained on %d, predicted %d in %.1fs",
             fold,
             len(train_rows),
             len(held_out),
-            time.perf_counter() - started,
+            elapsed,
         )
         predictions.extend(
             OofPrediction(
@@ -64,7 +91,11 @@ def run_cross_validation(
         )
     if len(predictions) != len(dev_rows):
         raise RuntimeError("out-of-fold predictions do not cover development exactly once")
-    return sorted(predictions, key=lambda p: p.path)
+    return CvResult(
+        predictions=sorted(predictions, key=lambda p: p.path),
+        fit_infos=fit_infos,
+        fold_seconds=fold_seconds,
+    )
 
 
 def save_oof(predictions: Sequence[OofPrediction], path: Path) -> None:

@@ -65,16 +65,41 @@ def _manifest(n_folds: int = 3, per_fold: int = 4) -> list[ManifestRow]:
 def test_every_dev_sample_predicted_exactly_once(tmp_path: Path) -> None:
     RecordingModel.instances = []
     rows = _manifest()
-    predictions = run_cross_validation(RecordingModel, rows, tmp_path, n_folds=3)
+    result = run_cross_validation(RecordingModel, rows, tmp_path, n_folds=3)
     dev_paths = {r.path for r in rows if r.split == "dev"}
-    assert sorted(p.path for p in predictions) == sorted(dev_paths)
+    assert sorted(p.path for p in result.predictions) == sorted(dev_paths)
+    assert len(result.fold_seconds) == 3
+
+
+def test_validation_passed_to_supporting_models(tmp_path: Path) -> None:
+    received: list[tuple[int, int]] = []
+
+    class ValidatingModel(RecordingModel):
+        def fit(
+            self,
+            image_paths: Sequence[Path],
+            labels: Sequence[int],
+            val_paths: Sequence[Path] | None = None,
+            val_labels: Sequence[int] | None = None,
+        ) -> None:
+            super().fit(image_paths, labels)
+            assert val_paths is not None and val_labels is not None
+            received.append((len(val_paths), len(val_labels)))
+            self.fit_info = {"best_epoch": 2}
+
+    result = run_cross_validation(
+        ValidatingModel, _manifest(), tmp_path, n_folds=3, pass_validation=True
+    )
+    assert received == [(4, 4), (4, 4), (4, 4)]
+    assert [info["best_epoch"] for info in result.fit_infos] == [2, 2, 2]
 
 
 def test_no_model_predicts_its_own_training_data(tmp_path: Path) -> None:
     RecordingModel.instances = []
     run_cross_validation(RecordingModel, _manifest(), tmp_path, n_folds=3)
-    assert len(RecordingModel.instances) == 3
-    for model in RecordingModel.instances:
+    instances = [m for m in RecordingModel.instances if type(m) is RecordingModel]
+    assert len(instances) == 3
+    for model in instances:
         assert not model.trained_on & model.predicted
 
 
