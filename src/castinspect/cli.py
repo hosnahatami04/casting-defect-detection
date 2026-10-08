@@ -316,6 +316,119 @@ def _oof_summary(
     }
 
 
+@app.command()
+def calibrate(
+    config: ConfigOption = DEFAULT_CONFIG_PATH,
+    model: Annotated[str, typer.Option(help="Model whose OOF predictions to calibrate.")] = (
+        "efficientnet_b0"
+    ),
+    policy_path: Annotated[Path, typer.Option(help="Where to freeze the policy.")] = Path(
+        "configs/policy.yaml"
+    ),
+) -> None:
+    """Fit calibration and freeze the decision policy, from out-of-fold
+    predictions only; the test split is never read here."""
+    import yaml
+
+    from castinspect.decision.calibration import (
+        apply_temperature,
+        expected_calibration_error,
+        fit_temperature,
+        probabilities_to_logits,
+        reliability_bins,
+    )
+    from castinspect.decision.cost import CostModel, best_two_way, three_way_cost
+    from castinspect.decision.threshold import (
+        cost_aware_review_threshold,
+        operating_point,
+        operating_point_table,
+        reject_threshold,
+    )
+    from castinspect.evaluation.cv import load_oof, oof_arrays
+
+    settings = load_settings(config)
+    oof_path = settings.paths.artifacts / "oof" / f"{model}.parquet"
+    labels, probabilities, _ = oof_arrays(load_oof(oof_path))
+    logits = probabilities_to_logits(probabilities)
+
+    temperature = fit_temperature(labels, logits)
+    calibrated = apply_temperature(logits, temperature)
+    ece_before = expected_calibration_error(labels, probabilities)
+    ece_after = expected_calibration_error(labels, calibrated)
+    typer.echo(f"temperature: {temperature:.4f}; ECE {ece_before:.4f} -> {ece_after:.4f}")
+
+    costs = CostModel(
+        escape=settings.decision.costs.escape,
+        false_reject=settings.decision.costs.false_reject,
+        manual_review=settings.decision.costs.manual_review,
+    )
+    recall_target = settings.decision.recall_target
+    t_reject = reject_threshold(labels, calibrated, recall_target)
+    t_review = cost_aware_review_threshold(
+        labels, calibrated, t_reject, settings.decision.max_escape, costs
+    )
+    reject_point = operating_point(labels, calibrated, t_reject)
+    review_point = operating_point(labels, calibrated, t_review)
+    n_defects = int(labels.sum())
+    escapes = n_defects - review_point.defects_caught
+    reviews = int(np.sum((calibrated >= t_review) & (calibrated < t_reject)))
+    typer.echo(
+        f"t_reject={t_reject:.6f}: recall {reject_point.defect_recall:.4f} "
+        f"({reject_point.defects_caught}/{n_defects}), "
+        f"false rejects {reject_point.false_rejects}/{len(labels) - n_defects}"
+    )
+    typer.echo(
+        f"t_review={t_review:.6f}: escapes {escapes}/{n_defects} "
+        f"({escapes / n_defects:.4%}), review load {reviews}/{len(labels)} "
+        f"({reviews / len(labels):.4%})"
+    )
+
+    frozen_cost = three_way_cost(labels, calibrated, t_review, t_reject, costs)
+    best_threshold, best_cost = best_two_way(labels, calibrated, costs)
+    typer.echo(
+        f"expected cost per part: three-way {frozen_cost:.4f} vs "
+        f"best two-way {best_cost:.4f} (threshold {best_threshold:.6f})"
+    )
+
+    table = operating_point_table(labels, calibrated, [0.95, 0.97, 0.98, 0.99, 0.995, 1.0])
+    for point in table:
+        typer.echo(
+            f"  recall>={point.defect_recall:.4f} at t={point.threshold:.6f}: "
+            f"false rejects {point.false_rejects} ({point.false_reject_rate:.2%})"
+        )
+
+    calibration_dir = settings.paths.artifacts / "calibration"
+    calibration_dir.mkdir(parents=True, exist_ok=True)
+    details = {
+        "temperature": temperature,
+        "ece_before": ece_before,
+        "ece_after": ece_after,
+        "reliability_before": [vars(b) for b in reliability_bins(labels, probabilities)],
+        "reliability_after": [vars(b) for b in reliability_bins(labels, calibrated)],
+        "operating_points": [vars(p) for p in table],
+        "frozen_cost_per_part": frozen_cost,
+        "best_two_way": {"threshold": best_threshold, "cost_per_part": best_cost},
+    }
+    details_path = calibration_dir / f"{model}_calibration.json"
+    details_path.write_text(json.dumps(details, indent=2), encoding="utf-8")
+    typer.echo(f"calibration details written to {details_path}")
+
+    # Full precision on purpose: rounding a threshold can move it past a
+    # borderline sample and silently break the recall guarantee.
+    policy = {
+        "version": "1",
+        "model": model,
+        "temperature": float(temperature),
+        "thresholds": {"review": float(t_review), "reject": float(t_reject)},
+        "recall_target": recall_target,
+        "max_escape": settings.decision.max_escape,
+        "oof_source": oof_path.as_posix(),
+    }
+    policy_path.parent.mkdir(parents=True, exist_ok=True)
+    policy_path.write_text(yaml.safe_dump(policy, sort_keys=False), encoding="utf-8")
+    typer.echo(f"policy frozen to {policy_path}")
+
+
 def _split_stats(
     records: list[ImageRecord],
     assignments: list[SplitAssignment],
