@@ -1,0 +1,78 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "castinspect"
+version = "0.1.0"
+description = "Visual inspection of metal castings with a cost-aware three-way decision policy"
+authors = [{ name = "Hosna Hatami" }]
+license = { text = "MIT" }
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "numpy>=1.26",
+    "pillow>=10.3",
+    "pyyaml>=6.0",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.4",
+    "typer>=0.12",
+]
+
+[project.optional-dependencies]
+ml = [
+    "torch>=2.2",
+    "torchvision>=0.17",
+    "timm>=1.0",
+    "scikit-image>=0.23",
+    "scikit-learn>=1.4",
+    "matplotlib>=3.8",
+]
+deploy = [
+    "onnx>=1.16",
+    "onnxruntime>=1.18",
+]
+dev = [
+    "pytest>=8.2",
+    "pytest-cov>=5.0",
+    "hypothesis>=6.100",
+    "ruff>=0.6",
+    "mypy>=1.10",
+    "pre-commit>=3.7",
+    "pip-audit>=2.7",
+    "types-PyYAML>=6.0",
+]
+
+[project.scripts]
+castinspect = "castinspect.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/castinspect"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
+
+[tool.mypy]
+strict = true
+files = ["src"]
+python_version = "3.11"
+plugins = ["pydantic.mypy"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = [
+    "ml: heavy tests that require the ml extras and real model weights",
+]
+
+[tool.coverage.run]
+source = ["src/castinspect"]
+omit = ["src/castinspect/ui/*"]
+
+[tool.coverage.report]
+show_missing = true
