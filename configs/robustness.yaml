@@ -1,0 +1,25 @@
+# Camera-realistic perturbations, each with three severities (mild, medium, severe).
+# Severity semantics are perturbation-specific; zero always means identity.
+perturbations:
+  brightness:
+    # Multiplicative dimming: factor = 1 - severity.
+    severities: [0.1, 0.25, 0.4]
+  contrast:
+    # Contrast reduction toward the mean: factor = 1 - severity.
+    severities: [0.1, 0.25, 0.4]
+  gaussian_blur:
+    # Blur radius in pixels at the native 512x512 resolution.
+    severities: [0.5, 1.5, 3.0]
+  gaussian_noise:
+    # Noise standard deviation on the 0-255 intensity scale.
+    severities: [4, 10, 20]
+  jpeg:
+    # Re-encoding quality; lower is worse.
+    severities: [60, 35, 15]
+  translate:
+    # Shift right and down as a fraction of the image side.
+    severities: [0.01, 0.03, 0.06]
+  rotate:
+    # Rotation in degrees around the centre.
+    severities: [2, 5, 10]
+seed: 42

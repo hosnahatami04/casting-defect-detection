@@ -37,6 +37,8 @@ def run_cross_validation(
     image_root: Path,
     n_folds: int,
     pass_validation: bool = False,
+    fold_model_dir: Path | None = None,
+    fold_model_name: str = "model",
 ) -> CvResult:
     """With pass_validation, each model receives the held-out fold for early
     stopping. The resulting out-of-fold scores are then mildly optimistic
@@ -69,6 +71,8 @@ def run_cross_validation(
         else:
             model.fit(train_paths, train_labels)
         probabilities = model.predict_proba(held_out_paths)
+        if fold_model_dir is not None:
+            model.save(fold_model_dir / f"{fold_model_name}_fold{fold}.pt")
         elapsed = time.perf_counter() - started
         fold_seconds.append(elapsed)
         fit_infos.append(dict(getattr(model, "fit_info", {})))

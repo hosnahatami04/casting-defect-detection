@@ -1,15 +1,16 @@
 import json
 import logging
 from collections import Counter
+from collections.abc import Callable
 from pathlib import Path
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated, Any
 
 import numpy as np
 import numpy.typing as npt
 import typer
 
 from castinspect import __version__
-from castinspect.config import DEFAULT_CONFIG_PATH, load_settings
+from castinspect.config import DEFAULT_CONFIG_PATH, Settings, load_settings
 from castinspect.data.acquire import (
     find_archive,
     locate_image_root,
@@ -32,6 +33,9 @@ from castinspect.data.split import (
     write_manifest,
 )
 from castinspect.logging import setup_logging
+
+if TYPE_CHECKING:
+    from castinspect.evaluation.robustness import LabelledImage
 
 logger = logging.getLogger(__name__)
 
@@ -171,6 +175,9 @@ def cv(
     image_root: Annotated[
         Path | None, typer.Option(help="Dataset image root; defaults to a search in data_raw.")
     ] = None,
+    save_folds: Annotated[
+        bool, typer.Option(help="Save each fold's fitted model for later analyses.")
+    ] = False,
 ) -> None:
     from castinspect.evaluation.cv import oof_arrays, run_cross_validation, save_oof
     from castinspect.models.base import create_model
@@ -188,6 +195,8 @@ def cv(
         root,
         settings.split.n_folds,
         pass_validation=pass_validation,
+        fold_model_dir=(settings.paths.artifacts / "models") if save_folds else None,
+        fold_model_name=name,
     )
     oof_path = settings.paths.artifacts / "oof" / f"{name}.parquet"
     save_oof(result.predictions, oof_path)
@@ -217,6 +226,7 @@ def _load_model_spec(model_config: Path) -> tuple[str, dict[str, object], bool]:
         "castinspect.models.hog",
         "castinspect.models.resnet",
         "castinspect.models.efficientnet",
+        "castinspect.models.oneclass",
     ):
         importlib.import_module(module)
 
@@ -427,6 +437,379 @@ def calibrate(
     policy_path.parent.mkdir(parents=True, exist_ok=True)
     policy_path.write_text(yaml.safe_dump(policy, sort_keys=False), encoding="utf-8")
     typer.echo(f"policy frozen to {policy_path}")
+
+
+def _dev_items(settings: Settings, root: Path) -> list["LabelledImage"]:
+    from PIL import Image
+
+    from castinspect.data.dataset import LABEL_TO_INDEX
+    from castinspect.evaluation.robustness import LabelledImage
+
+    rows = [r for r in read_manifest(settings.paths.data_processed / "manifest.csv")]
+    items = []
+    for row in rows:
+        if row.split != "dev":
+            continue
+        with Image.open(root / row.path) as img:
+            items.append(LabelledImage(row.fold, LABEL_TO_INDEX[row.label], img.convert("L")))
+    return items
+
+
+def _fold_models(settings: Settings, name: str = "efficientnet_b0") -> dict[int, Any]:
+    from castinspect.models.efficientnet import EfficientNetClassifier
+
+    models: dict[int, Any] = {}
+    for fold in range(settings.split.n_folds):
+        path = settings.paths.artifacts / "models" / f"{name}_fold{fold}.pt"
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"{path} missing; run castinspect cv configs/models/{name}.yaml --save-folds"
+            )
+        model = EfficientNetClassifier(pretrained=False)
+        model.load(path)
+        models[fold] = model
+    return models
+
+
+def _policy_calibrator(
+    policy_path: Path,
+) -> tuple[Any, Callable[[npt.NDArray[np.float64]], npt.NDArray[np.float64]]]:
+    from castinspect.decision.calibration import apply_temperature, probabilities_to_logits
+    from castinspect.decision.policy import load_policy
+
+    policy = load_policy(policy_path)
+
+    def calibrate(probabilities: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+        return apply_temperature(probabilities_to_logits(probabilities), policy.temperature)
+
+    return policy, calibrate
+
+
+@app.command()
+def robustness(
+    config: ConfigOption = DEFAULT_CONFIG_PATH,
+    perturbations: Annotated[Path, typer.Option(help="Perturbation config.")] = Path(
+        "configs/robustness.yaml"
+    ),
+    policy_path: Annotated[Path, typer.Option(help="Frozen policy.")] = Path("configs/policy.yaml"),
+) -> None:
+    """Perturbation suite on development images, each scored by the fold model
+    that held it out, under the frozen policy."""
+    from castinspect.evaluation.robustness import (
+        load_perturbations,
+        max_recall_drop,
+        run_robustness,
+    )
+
+    settings = load_settings(config)
+    root = locate_image_root(settings.paths.data_raw)
+    specs, seed = load_perturbations(perturbations)
+    policy, calibrate = _policy_calibrator(policy_path)
+    models = _fold_models(settings, policy.model)
+    items = _dev_items(settings, root)
+
+    rows = run_robustness(
+        lambda fold, images: models[fold].predict_images(images),
+        items,
+        specs,
+        calibrate,
+        policy.thresholds.review,
+        policy.thresholds.reject,
+        seed,
+    )
+    table = [
+        {
+            "perturbation": r.perturbation,
+            "level": r.level,
+            "severity": r.severity,
+            "auroc": r.auroc,
+            "defect_recall": r.outcome.defect_recall,
+            "escapes": f"{r.outcome.escapes}/{r.outcome.n_defects}",
+            "false_reject_rate": r.outcome.false_reject_rate,
+            "false_rejects": f"{r.outcome.false_rejects}/{r.outcome.n_ok}",
+            "review_share": r.outcome.review_share,
+        }
+        for r in rows
+    ]
+    worst, drop = max_recall_drop(rows, level=2)
+    output = settings.paths.artifacts / "robustness" / "oof_robustness.json"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(
+        json.dumps(
+            {"rows": table, "max_medium_recall_drop": {"perturbation": worst, "points": drop}},
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    for entry in table:
+        typer.echo(
+            f"{entry['perturbation']:>15} L{entry['level']} sev={entry['severity']:<5} "
+            f"auroc={entry['auroc']:.4f} recall={entry['defect_recall']:.4f} "
+            f"escapes={entry['escapes']} false_rejects={entry['false_rejects']} "
+            f"review={entry['review_share']:.3f}"
+        )
+    typer.echo(f"max recall drop at medium severity: {drop:.2f} points ({worst})")
+    typer.echo(f"written to {output}")
+
+
+@app.command()
+def shortcut(
+    config: ConfigOption = DEFAULT_CONFIG_PATH,
+    policy_path: Annotated[Path, typer.Option(help="Frozen policy.")] = Path("configs/policy.yaml"),
+    limit: Annotated[float, typer.Option(help="AUROC above this flags a shortcut.")] = 0.60,
+) -> None:
+    """AUROC from background alone: the part is masked out and each image is
+    scored by its held-out fold model. Near 0.5 means no background shortcut."""
+    from castinspect.evaluation.robustness import background_auroc
+
+    settings = load_settings(config)
+    root = locate_image_root(settings.paths.data_raw)
+    policy, _ = _policy_calibrator(policy_path)
+    models = _fold_models(settings, policy.model)
+    items = _dev_items(settings, root)
+    value = background_auroc(lambda fold, images: models[fold].predict_images(images), items)
+
+    output = settings.paths.artifacts / "robustness" / "shortcut.json"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(
+        json.dumps({"background_only_auroc": value, "n": len(items), "limit": limit}, indent=2),
+        encoding="utf-8",
+    )
+    typer.echo(f"background-only AUROC: {value:.4f} over {len(items)} images (limit {limit})")
+    if value > limit:
+        typer.secho("possible background shortcut: review before continuing", err=True)
+        raise typer.Exit(code=2)
+
+
+@app.command()
+def gradcam(
+    config: ConfigOption = DEFAULT_CONFIG_PATH,
+    policy_path: Annotated[Path, typer.Option(help="Frozen policy.")] = Path("configs/policy.yaml"),
+    per_category: Annotated[int, typer.Option(help="Examples per category.")] = 3,
+) -> None:
+    """Grad-CAM grid over out-of-fold examples: caught defects, the hardest
+    defects, false rejects and review-band parts. Written under artifacts/
+    only: the dataset licence does not allow redistributing derived images."""
+    from PIL import Image
+
+    from castinspect.evaluation.cv import load_oof
+    from castinspect.explain.gradcam import GradCam, overlay
+    from castinspect.models.train import build_eval_transform
+
+    settings = load_settings(config)
+    root = locate_image_root(settings.paths.data_raw)
+    policy, calibrate = _policy_calibrator(policy_path)
+    models = _fold_models(settings, policy.model)
+    oof = load_oof(settings.paths.artifacts / "oof" / f"{policy.model}.parquet")
+    calibrated = calibrate(np.asarray([p.probability for p in oof]))
+    review, reject = policy.thresholds.review, policy.thresholds.reject
+
+    indexed = list(zip(oof, calibrated, strict=True))
+    defects = sorted((x for x in indexed if x[0].label == 1), key=lambda x: x[1])
+    healthy_rejected = sorted(
+        (x for x in indexed if x[0].label == 0 and x[1] >= reject), key=lambda x: -x[1]
+    )
+    in_band = sorted((x for x in indexed if review <= x[1] < reject), key=lambda x: x[1])
+    categories = {
+        "caught defect": [x for x in defects if x[1] >= reject][-per_category:],
+        "hardest defect": defects[:per_category],
+        "false reject": healthy_rejected[:per_category],
+        "review band": in_band[:per_category],
+    }
+
+    tile_size = 224
+    tiles: list[npt.NDArray[np.uint8]] = []
+    summary: dict[str, list[dict[str, object]]] = {}
+    for category, examples in categories.items():
+        summary[category] = []
+        for prediction, probability in examples:
+            with Image.open(root / prediction.path) as img:
+                image = img.convert("L")
+            model = models[prediction.fold]
+            cam = GradCam(model.network)
+            heatmap = cam.heatmap(build_eval_transform(model.image_size)(image))
+            tile = overlay(image.resize((tile_size, tile_size)), heatmap)
+            tiles.append(np.asarray(tile))
+            summary[category].append(
+                {
+                    "path": prediction.path,
+                    "label": prediction.label,
+                    "probability": float(probability),
+                }
+            )
+        while len(tiles) % per_category:
+            tiles.append(np.full((tile_size, tile_size, 3), 255, dtype=np.uint8))
+
+    rows = [np.hstack(tiles[i : i + per_category]) for i in range(0, len(tiles), per_category)]
+    figure_dir = settings.paths.artifacts / "figures"
+    figure_dir.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(np.vstack(rows)).save(figure_dir / "gradcam_oof_grid.png")
+    (figure_dir / "gradcam_oof_grid.json").write_text(
+        json.dumps(summary, indent=2), encoding="utf-8"
+    )
+    typer.echo(f"grid rows: {list(categories)}; written to {figure_dir / 'gradcam_oof_grid.png'}")
+
+
+@app.command()
+def efficiency(
+    config: ConfigOption = DEFAULT_CONFIG_PATH,
+    model_config: Annotated[Path, typer.Option(help="Supervised model YAML.")] = Path(
+        "configs/models/efficientnet_b0.yaml"
+    ),
+    fractions: Annotated[str, typer.Option(help="Comma-separated defect fractions.")] = (
+        "0.05,0.1,0.25,0.5,1.0"
+    ),
+    seeds: Annotated[str, typer.Option(help="Comma-separated seeds.")] = "0,1,2",
+    epochs: Annotated[
+        int | None, typer.Option(help="Fixed epochs; defaults to the CV median.")
+    ] = None,
+    oneclass_config: Annotated[
+        Path, typer.Option(help="Embedding backbone settings for the one-class model.")
+    ] = Path("configs/models/resnet18.yaml"),
+) -> None:
+    """Data-efficiency curve: AUROC versus share of defective training images,
+    plus a one-class reference that sees no defect at all."""
+    import statistics
+    from dataclasses import asdict
+
+    from castinspect.evaluation.cv import oof_arrays, run_cross_validation
+    from castinspect.evaluation.efficiency import run_efficiency_point
+    from castinspect.evaluation.intervals import bootstrap_auroc
+    from castinspect.models.base import create_model
+
+    settings = load_settings(config)
+    root = locate_image_root(settings.paths.data_raw)
+    manifest = read_manifest(settings.paths.data_processed / "manifest.csv")
+    name, params, _ = _load_model_spec(model_config)
+    if epochs is None:
+        info = json.loads(
+            (settings.paths.artifacts / "oof" / f"{name}_fit_info.json").read_text(encoding="utf-8")
+        )
+        epochs = int(statistics.median(fold["best_epoch"] for fold in info["folds"]))
+    params["epochs_override"] = epochs
+    typer.echo(f"supervised model {name}, fixed {epochs} epochs (no early stopping)")
+
+    points = []
+    for fraction in (float(f) for f in fractions.split(",")):
+        for seed in (int(s) for s in seeds.split(",")):
+            point = run_efficiency_point(
+                lambda: create_model(name, **params),
+                manifest,
+                root,
+                fraction,
+                seed,
+                settings.split.n_folds,
+            )
+            points.append(asdict(point))
+            typer.echo(
+                f"fraction {fraction:.2f} seed {seed} fold {point.eval_fold}: "
+                f"{point.n_defects_train} defects, AUROC {point.auroc:.4f}"
+            )
+
+    # One-class reference on frozen embeddings: no defective image enters the
+    # reference set and k is fixed a priori, since choosing it by AUROC would
+    # need defect labels (ADR 0007). The curve's zero point stays honest.
+    _, probe_params, _ = _load_model_spec(oneclass_config)
+    oneclass_params: dict[str, object] = {
+        "k": 5,
+        "k_grid": (5,),
+        **{
+            key: probe_params[key]
+            for key in ("pretrained", "weights_sha256", "cache_dir", "image_size")
+            if key in probe_params
+        },
+    }
+    result = run_cross_validation(
+        lambda: create_model("oneclass_knn", **oneclass_params),
+        manifest,
+        root,
+        settings.split.n_folds,
+    )
+    labels, scores, groups = oof_arrays(result.predictions)
+    oneclass = bootstrap_auroc(labels, scores, groups)
+    typer.echo(
+        f"one-class kNN (k=5, zero defects): OOF AUROC {oneclass.point:.4f} "
+        f"[{oneclass.lower:.4f}, {oneclass.upper:.4f}]"
+    )
+
+    output = settings.paths.artifacts / "efficiency" / "efficiency.json"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(
+        json.dumps(
+            {
+                "model": name,
+                "epochs": epochs,
+                "points": points,
+                "oneclass_knn": {"k": 5, "auroc": asdict(oneclass), "n": len(labels)},
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    typer.echo(f"written to {output}")
+
+
+@app.command()
+def figures(
+    config: ConfigOption = DEFAULT_CONFIG_PATH,
+    model: Annotated[str, typer.Option(help="Model name for the calibration figure.")] = (
+        "efficientnet_b0"
+    ),
+) -> None:
+    """Render the evaluation figures from the JSON artifacts produced by the
+    calibrate, robustness and efficiency commands."""
+    from castinspect.evaluation.report import (
+        render_efficiency_curve,
+        render_reliability,
+        render_robustness_bars,
+    )
+
+    settings = load_settings(config)
+    figure_dir = settings.paths.reports / "figures"
+    figure_dir.mkdir(parents=True, exist_ok=True)
+    render_efficiency_curve(
+        settings.paths.artifacts / "efficiency" / "efficiency.json",
+        figure_dir / "data_efficiency.png",
+    )
+    render_robustness_bars(
+        settings.paths.artifacts / "robustness" / "oof_robustness.json",
+        figure_dir / "robustness_oof.png",
+    )
+    render_reliability(
+        settings.paths.artifacts / "calibration" / f"{model}_calibration.json",
+        figure_dir / "reliability.png",
+    )
+    for name in ("data_efficiency.png", "robustness_oof.png", "reliability.png"):
+        typer.echo(f"rendered {figure_dir / name}")
+
+
+@app.command("label-sheet")
+def label_sheet(
+    config: ConfigOption = DEFAULT_CONFIG_PATH,
+    count: Annotated[int, typer.Option(help="Number of defective images to list.")] = 100,
+    output: Annotated[Path | None, typer.Option(help="CSV destination.")] = None,
+) -> None:
+    """Blank sheet of defective development images for a person to annotate
+    with a visible defect type. The defect_type column is left empty: the
+    dataset carries no defect types and none are inferred."""
+    import csv
+
+    settings = load_settings(config)
+    rows = [
+        r
+        for r in read_manifest(settings.paths.data_processed / "manifest.csv")
+        if r.split == "dev" and r.label == "def"
+    ]
+    rng = np.random.default_rng(settings.seed)
+    picked = sorted(rng.choice(len(rows), size=min(count, len(rows)), replace=False))
+    destination = output or settings.paths.artifacts / "labelling" / "defect_types.csv"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with destination.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["path", "fold", "defect_type"])
+        for index in picked:
+            writer.writerow([rows[int(index)].path, rows[int(index)].fold, ""])
+    typer.echo(f"{len(picked)} defective images listed in {destination}")
 
 
 def _split_stats(
