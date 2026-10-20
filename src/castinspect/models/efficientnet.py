@@ -5,6 +5,7 @@ from typing import Any, cast
 
 import numpy as np
 import numpy.typing as npt
+from PIL import Image
 
 from castinspect.data.acquire import sha256_file
 from castinspect.models.base import register_model
@@ -125,24 +126,33 @@ class EfficientNetClassifier:
                 outputs.append(torch.sigmoid(self._network(batch).squeeze(1)))
         return cast(npt.NDArray[np.float64], torch.cat(outputs).numpy().astype(np.float64))
 
-    def predict_logits(self, image_paths: Sequence[Path]) -> npt.NDArray[np.float64]:
+    def predict_images(self, images: Sequence[Image.Image]) -> npt.NDArray[np.float64]:
+        """Same preprocessing as predict_proba, for images already in memory
+        (perturbed or masked variants that never touch disk)."""
         import torch
-        from torch.utils.data import DataLoader
 
         if self._network is None:
             raise RuntimeError("model is not fitted")
-        dataset = PathsDataset(
-            image_paths, [0] * len(image_paths), build_eval_transform(self._image_size)
-        )
-        loader: DataLoader[Any] = DataLoader(
-            cast(Any, dataset), batch_size=self._settings.batch_size, shuffle=False
-        )
+        transform = build_eval_transform(self._image_size)
+        batch_size = self._settings.batch_size
         self._network.eval()
         outputs = []
         with torch.no_grad():
-            for batch, _ in loader:
-                outputs.append(self._network(batch).squeeze(1))
+            for start in range(0, len(images), batch_size):
+                chunk = images[start : start + batch_size]
+                batch = torch.stack([transform(image.convert("L")) for image in chunk])
+                outputs.append(torch.sigmoid(self._network(batch).squeeze(1)))
         return cast(npt.NDArray[np.float64], torch.cat(outputs).numpy().astype(np.float64))
+
+    @property
+    def network(self) -> Any:
+        if self._network is None:
+            raise RuntimeError("model is not fitted")
+        return self._network
+
+    @property
+    def image_size(self) -> int:
+        return self._image_size
 
     def save(self, path: Path) -> None:
         import torch
