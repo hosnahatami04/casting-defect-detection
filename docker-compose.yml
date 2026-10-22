@@ -1,0 +1,28 @@
+services:
+  api:
+    build:
+      context: .
+      target: api
+    ports:
+      - "8000:8000"
+    environment:
+      CASTINSPECT_ONNX: /app/artifacts/onnx/efficientnet_b0.onnx
+      CASTINSPECT_POLICY: /app/configs/policy.yaml
+      CASTINSPECT_THREADS: "1"
+    volumes:
+      - ./artifacts/onnx:/app/artifacts/onnx:ro
+      - ./configs:/app/configs:ro
+
+  ui:
+    build:
+      context: .
+      target: ui
+    ports:
+      - "8501:8501"
+    depends_on:
+      api:
+        condition: service_healthy
+    volumes:
+      - ./artifacts:/app/artifacts:ro
+      - ./configs:/app/configs:ro
+      - ./reports:/app/reports:ro

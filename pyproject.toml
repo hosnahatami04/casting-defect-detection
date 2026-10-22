@@ -34,6 +34,14 @@ deploy = [
     "onnx>=1.16",
     "onnxruntime>=1.18",
 ]
+serve = [
+    "fastapi>=0.111",
+    "uvicorn>=0.30",
+    "python-multipart>=0.0.9",
+]
+ui = [
+    "streamlit>=1.36",
+]
 dev = [
     "pytest>=8.2",
     "pytest-cov>=5.0",
@@ -76,12 +84,22 @@ python_version = "3.11"
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["skimage.*", "sklearn.*", "pyarrow.*", "timm.*", "scipy.*", "torchvision.*"]
+module = [
+    "skimage.*",
+    "sklearn.*",
+    "pyarrow.*",
+    "timm.*",
+    "scipy.*",
+    "torchvision.*",
+    "onnxruntime.*",
+    "streamlit.*",
+]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+pythonpath = ["."]
 markers = [
     "ml: heavy tests that require the ml extras and real model weights",
 ]
