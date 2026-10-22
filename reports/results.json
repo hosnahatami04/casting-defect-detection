@@ -1,0 +1,65 @@
+{
+  "evaluated_on": "test",
+  "n_images": 261,
+  "frozen_policy": {
+    "model": "efficientnet_b0",
+    "temperature": 1.4419631923071183,
+    "thresholds": {
+      "review": 0.01668567470619234,
+      "reject": 0.2021719476695814
+    },
+    "version": "1"
+  },
+  "hashes": {
+    "manifest_sha256": "12fbb5e8cef5e4dedf926cfdb306fac7344386b652e0bb2017570daba145a852",
+    "onnx_sha256": "efaa6a20f07c0116143e88630320f9546d285da6d8b5da7b85ba8b290d08bdf2",
+    "policy_sha256": "78d224291690b3c7073ad4dc5c96aa1280d71f4f37c0464782a273197f0694dc"
+  },
+  "metrics": {
+    "n": 261,
+    "n_defect": 157,
+    "n_ok": 104,
+    "auroc": {
+      "point": 0.9990813326800588,
+      "lower": 0.9965796417796082,
+      "upper": 1.0
+    },
+    "ece": 0.011651492535108754,
+    "defect_recall": {
+      "point": 1.0,
+      "lower": 0.9767778353966748,
+      "upper": 1.0,
+      "raw": "157/157"
+    },
+    "escape_rate": {
+      "point": 0.0,
+      "lower": 0.0,
+      "upper": 0.023222164603325136,
+      "raw": "0/157"
+    },
+    "false_reject_rate": {
+      "point": 0.019230769230769232,
+      "lower": 0.0023374796086099905,
+      "upper": 0.06774489489176366,
+      "raw": "2/104"
+    },
+    "manual_review_rate": {
+      "point": 0.13026819923371646,
+      "lower": 0.09192892058284916,
+      "upper": 0.1772541281649469,
+      "raw": "34/261"
+    },
+    "confusion": {
+      "pass_ok": 69,
+      "pass_defect_escape": 0,
+      "review_ok": 33,
+      "review_defect": 1,
+      "reject_ok_false": 2,
+      "reject_defect": 156
+    }
+  },
+  "baselines": {
+    "hog_oof_auroc": 0.9898946594806467,
+    "resnet18_probe_oof_auroc": 0.9955903968642822
+  }
+}

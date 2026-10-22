@@ -1,0 +1,16 @@
+{
+  "description": "Expected metric shape and bounds for the synthetic KPI smoke test. Not the real model's numbers; a CI gate that the evaluation pipeline runs end to end and produces sane, separable-case metrics on a tiny synthetic model.",
+  "min_auroc": 0.9,
+  "max_ece": 0.4,
+  "min_defect_recall": 0.9,
+  "max_escape_rate": 0.1,
+  "required_keys": [
+    "auroc",
+    "ece",
+    "defect_recall",
+    "escape_rate",
+    "false_reject_rate",
+    "manual_review_rate",
+    "confusion"
+  ]
+}
