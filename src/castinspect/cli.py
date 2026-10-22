@@ -439,7 +439,7 @@ def calibrate(
     typer.echo(f"policy frozen to {policy_path}")
 
 
-def _dev_items(settings: Settings, root: Path) -> list["LabelledImage"]:
+def _split_items(settings: Settings, root: Path, split: str) -> list["LabelledImage"]:
     from PIL import Image
 
     from castinspect.data.dataset import LABEL_TO_INDEX
@@ -448,10 +448,13 @@ def _dev_items(settings: Settings, root: Path) -> list["LabelledImage"]:
     rows = [r for r in read_manifest(settings.paths.data_processed / "manifest.csv")]
     items = []
     for row in rows:
-        if row.split != "dev":
+        if row.split != split:
             continue
+        # Dev images keep their fold (scored by the held-out model); test images
+        # all map to fold 0, scored by the single final model.
+        fold = row.fold if split == "dev" else 0
         with Image.open(root / row.path) as img:
-            items.append(LabelledImage(row.fold, LABEL_TO_INDEX[row.label], img.convert("L")))
+            items.append(LabelledImage(fold, LABEL_TO_INDEX[row.label], img.convert("L")))
     return items
 
 
@@ -469,6 +472,17 @@ def _fold_models(settings: Settings, name: str = "efficientnet_b0") -> dict[int,
         model.load(path)
         models[fold] = model
     return models
+
+
+def _final_model(settings: Settings, name: str = "efficientnet_b0") -> dict[int, Any]:
+    from castinspect.models.efficientnet import EfficientNetClassifier
+
+    path = settings.paths.artifacts / "models" / f"{name}_final.pt"
+    if not path.is_file():
+        raise FileNotFoundError(f"{path} missing; run castinspect train-final")
+    model = EfficientNetClassifier(pretrained=False)
+    model.load(path)
+    return {0: model}
 
 
 def _policy_calibrator(
@@ -492,9 +506,10 @@ def robustness(
         "configs/robustness.yaml"
     ),
     policy_path: Annotated[Path, typer.Option(help="Frozen policy.")] = Path("configs/policy.yaml"),
+    split: Annotated[str, typer.Option(help="dev (fold models) or test (final model).")] = "dev",
 ) -> None:
-    """Perturbation suite on development images, each scored by the fold model
-    that held it out, under the frozen policy."""
+    """Perturbation suite under the frozen policy. On dev, each image is scored
+    by the fold model that held it out; on test, by the final model."""
     from castinspect.evaluation.robustness import (
         load_perturbations,
         max_recall_drop,
@@ -505,8 +520,12 @@ def robustness(
     root = locate_image_root(settings.paths.data_raw)
     specs, seed = load_perturbations(perturbations)
     policy, calibrate = _policy_calibrator(policy_path)
-    models = _fold_models(settings, policy.model)
-    items = _dev_items(settings, root)
+    models = (
+        _fold_models(settings, policy.model)
+        if split == "dev"
+        else _final_model(settings, policy.model)
+    )
+    items = _split_items(settings, root, split)
 
     rows = run_robustness(
         lambda fold, images: models[fold].predict_images(images),
@@ -532,7 +551,8 @@ def robustness(
         for r in rows
     ]
     worst, drop = max_recall_drop(rows, level=2)
-    output = settings.paths.artifacts / "robustness" / "oof_robustness.json"
+    stem = "oof_robustness" if split == "dev" else "test_robustness"
+    output = settings.paths.artifacts / "robustness" / f"{stem}.json"
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(
         json.dumps(
@@ -566,7 +586,7 @@ def shortcut(
     root = locate_image_root(settings.paths.data_raw)
     policy, _ = _policy_calibrator(policy_path)
     models = _fold_models(settings, policy.model)
-    items = _dev_items(settings, root)
+    items = _split_items(settings, root, "dev")
     value = background_auroc(lambda fold, images: models[fold].predict_images(images), items)
 
     output = settings.paths.artifacts / "robustness" / "shortcut.json"
@@ -747,6 +767,172 @@ def efficiency(
         encoding="utf-8",
     )
     typer.echo(f"written to {output}")
+
+
+@app.command()
+def evaluate(
+    config: ConfigOption = DEFAULT_CONFIG_PATH,
+    policy_path: Annotated[Path, typer.Option(help="Frozen policy.")] = Path("configs/policy.yaml"),
+) -> None:
+    """Final test-set evaluation, once, with the ONNX model and frozen policy.
+    This is the only command that reads the test split."""
+    import hashlib
+
+    from PIL import Image
+
+    from castinspect.data.acquire import sha256_file
+    from castinspect.deploy.runtime import OnnxInspector
+    from castinspect.evaluation.final import baseline_auroc, evaluate_test, metrics_to_dict
+
+    settings = load_settings(config)
+    policy, calibrate = _policy_calibrator(policy_path)
+    root = locate_image_root(settings.paths.data_raw)
+    manifest_path = settings.paths.data_processed / "manifest.csv"
+    test_rows = [r for r in read_manifest(manifest_path) if r.split == "test"]
+    typer.echo(f"TEST-SET EVALUATION (once): {len(test_rows)} images under frozen policy")
+
+    onnx_path = settings.paths.artifacts / "onnx" / f"{policy.model}.onnx"
+    inspector = OnnxInspector(onnx_path)
+    images = []
+    for row in test_rows:
+        with Image.open(root / row.path) as img:
+            images.append(img.convert("L"))
+    labels = np.asarray([1 if r.label == "def" else 0 for r in test_rows], dtype=np.int64)
+    groups = np.asarray([r.group_id for r in test_rows], dtype=np.int64)
+    raw_probs = inspector.predict_proba(images)
+    calibrated = calibrate(np.asarray(raw_probs, dtype=np.float64))
+
+    metrics = evaluate_test(
+        labels, calibrated, groups, policy.thresholds.review, policy.thresholds.reject
+    )
+
+    # Baselines on the same test images, for the "beats baseline" KPI.
+    baselines: dict[str, float] = {}
+    for name in ("hog", "resnet18_probe"):
+        oof_path = settings.paths.artifacts / "oof" / f"{name}.parquet"
+        if oof_path.is_file():
+            baselines[name + "_oof_auroc"] = baseline_auroc(
+                *_model_test_scores(settings, root, test_rows, name)
+            )
+
+    manifest_hash = sha256_file(manifest_path)
+    model_hash = sha256_file(onnx_path)
+    policy_hash = hashlib.sha256(policy_path.read_bytes()).hexdigest()
+
+    results = {
+        "evaluated_on": "test",
+        "n_images": len(test_rows),
+        "frozen_policy": {
+            "model": policy.model,
+            "temperature": policy.temperature,
+            "thresholds": {
+                "review": policy.thresholds.review,
+                "reject": policy.thresholds.reject,
+            },
+            "version": policy.version,
+        },
+        "hashes": {
+            "manifest_sha256": manifest_hash,
+            "onnx_sha256": model_hash,
+            "policy_sha256": policy_hash,
+        },
+        "metrics": metrics_to_dict(metrics),
+        "baselines": baselines,
+    }
+    results_json = settings.paths.reports / "results.json"
+    results_json.parent.mkdir(parents=True, exist_ok=True)
+    results_json.write_text(json.dumps(results, indent=2), encoding="utf-8")
+    _write_results_markdown(settings.paths.reports / "results.md", results)
+
+    m = metrics
+    typer.echo(f"AUROC: {m.auroc.point:.4f} [{m.auroc.lower:.4f}, {m.auroc.upper:.4f}]")
+    typer.echo(f"ECE: {m.ece:.4f}")
+    typer.echo(
+        f"defect recall: {m.defect_recall.point:.4f} ({m.defect_recall.raw}) "
+        f"[{m.defect_recall.lower:.4f}, {m.defect_recall.upper:.4f}]"
+    )
+    typer.echo(
+        f"escape rate: {m.escape_rate.point:.4f} ({m.escape_rate.raw}) "
+        f"[{m.escape_rate.lower:.4f}, {m.escape_rate.upper:.4f}]"
+    )
+    typer.echo(
+        f"false reject rate: {m.false_reject_rate.point:.4f} ({m.false_reject_rate.raw}) "
+        f"[{m.false_reject_rate.lower:.4f}, {m.false_reject_rate.upper:.4f}]"
+    )
+    typer.echo(
+        f"manual review rate: {m.manual_review_rate.point:.4f} ({m.manual_review_rate.raw}) "
+        f"[{m.manual_review_rate.lower:.4f}, {m.manual_review_rate.upper:.4f}]"
+    )
+    typer.echo(f"results written to {results_json}")
+
+
+def _model_test_scores(
+    settings: Settings, root: Path, test_rows: list[ManifestRow], name: str
+) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.float64]]:
+    """Fit a baseline on development and score the test images, for the
+    baseline comparison in the final report."""
+    import importlib
+
+    from castinspect.data.dataset import LABEL_TO_INDEX
+    from castinspect.models.base import create_model
+
+    for module in ("castinspect.models.hog", "castinspect.models.resnet"):
+        importlib.import_module(module)
+    dev_rows = [
+        r for r in read_manifest(settings.paths.data_processed / "manifest.csv") if r.split == "dev"
+    ]
+    model = create_model(name)
+    model.fit(
+        [root / r.path for r in dev_rows],
+        [LABEL_TO_INDEX[r.label] for r in dev_rows],
+    )
+    scores = model.predict_proba([root / r.path for r in test_rows])
+    labels = np.asarray([LABEL_TO_INDEX[r.label] for r in test_rows], dtype=np.int64)
+    return labels, np.asarray(scores, dtype=np.float64)
+
+
+def _write_results_markdown(path: Path, results: dict[str, Any]) -> None:
+    m = results["metrics"]
+
+    def line(label: str, rate: dict[str, Any]) -> str:
+        return (
+            f"| {label} | {rate['point']:.4f} | {rate['raw']} "
+            f"| [{rate['lower']:.4f}, {rate['upper']:.4f}] |"
+        )
+
+    auroc = m["auroc"]
+    c = m["confusion"]
+    lines = [
+        "# Final test evaluation",
+        "",
+        f"Evaluated once on the {m['n']}-image test split "
+        f"({m['n_defect']} defective, {m['n_ok']} ok) under the frozen policy.",
+        "",
+        "| metric | point | raw | 95% CI |",
+        "|---|---|---|---|",
+        f"| AUROC | {auroc['point']:.4f} | — | [{auroc['lower']:.4f}, {auroc['upper']:.4f}] |",
+        f"| ECE | {m['ece']:.4f} | — | — |",
+        line("defect recall", m["defect_recall"]),
+        line("escape rate", m["escape_rate"]),
+        line("false reject rate", m["false_reject_rate"]),
+        line("manual review rate", m["manual_review_rate"]),
+        "",
+        "## Confusion by action",
+        "",
+        "| | ok | defect |",
+        "|---|---|---|",
+        f"| pass | {c['pass_ok']} | {c['pass_defect_escape']} (escape) |",
+        f"| manual review | {c['review_ok']} | {c['review_defect']} |",
+        f"| reject | {c['reject_ok_false']} (false) | {c['reject_defect']} |",
+        "",
+        "## Provenance",
+        "",
+        f"- manifest sha256: `{results['hashes']['manifest_sha256']}`",
+        f"- onnx sha256: `{results['hashes']['onnx_sha256']}`",
+        f"- policy sha256: `{results['hashes']['policy_sha256']}`",
+        "",
+    ]
+    path.write_text("\n".join(lines), encoding="utf-8")
 
 
 @app.command()
