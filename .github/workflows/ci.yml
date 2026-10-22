@@ -19,8 +19,8 @@ jobs:
         run: uv sync --extra dev
       - name: Lint
         run: |
-          uv run ruff check src tests
-          uv run ruff format --check src tests
+          uv run ruff check src tests benchmarks
+          uv run ruff format --check src tests benchmarks
       - name: Test
         run: uv run pytest -m "not ml"
 
@@ -34,8 +34,9 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install dependencies
-        run: uv sync --extra dev --extra ml
-      # mypy needs the ml dependencies installed to type-check the model code.
+        run: uv sync --extra dev --extra ml --extra deploy --extra serve --extra ui
+      # mypy and the heavy tests need the full dependency set (model code, ONNX
+      # runtime and the service/UI modules).
       - name: Type check
         run: uv run mypy
       - name: Heavy tests
