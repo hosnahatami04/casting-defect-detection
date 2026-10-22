@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM python:3.11-slim AS base
+FROM python:3.11.9-slim-bookworm AS base
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PYTHONHASHSEED=0
 COPY --from=ghcr.io/astral-sh/uv:0.8.0 /uv /usr/local/bin/uv
 WORKDIR /app
