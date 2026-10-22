@@ -750,6 +750,43 @@ def efficiency(
 
 
 @app.command()
+def export(
+    config: ConfigOption = DEFAULT_CONFIG_PATH,
+    model: Annotated[str, typer.Option(help="Model name of the final checkpoint.")] = (
+        "efficientnet_b0"
+    ),
+    parity_images: Annotated[int, typer.Option(help="Images for the parity check.")] = 200,
+) -> None:
+    """Export the final model to ONNX and report PyTorch/ONNX parity."""
+    from PIL import Image
+
+    from castinspect.deploy.export_onnx import check_parity, export_to_onnx
+
+    settings = load_settings(config)
+    checkpoint = settings.paths.artifacts / "models" / f"{model}_final.pt"
+    onnx_path = settings.paths.artifacts / "onnx" / f"{model}.onnx"
+    # 224 is the model's input size (configs/models), not the dataset image size.
+    export_to_onnx(checkpoint, onnx_path, 224)
+    typer.echo(f"exported to {onnx_path} ({onnx_path.stat().st_size / 1e6:.1f} MB)")
+
+    root = locate_image_root(settings.paths.data_raw)
+    rows = [
+        r for r in read_manifest(settings.paths.data_processed / "manifest.csv") if r.split == "dev"
+    ]
+    rng = np.random.default_rng(settings.seed)
+    picked = rng.choice(len(rows), size=min(parity_images, len(rows)), replace=False)
+    images = []
+    for index in picked:
+        with Image.open(root / rows[int(index)].path) as img:
+            images.append(img.convert("L"))
+    max_diff = check_parity(checkpoint, onnx_path, images)
+    typer.echo(f"max |PyTorch - ONNX| probability over {len(images)} images: {max_diff:.2e}")
+    if max_diff > 1e-4:
+        typer.secho("parity worse than 1e-4", err=True)
+        raise typer.Exit(code=1)
+
+
+@app.command()
 def figures(
     config: ConfigOption = DEFAULT_CONFIG_PATH,
     model: Annotated[str, typer.Option(help="Model name for the calibration figure.")] = (
