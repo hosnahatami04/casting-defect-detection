@@ -35,9 +35,18 @@ jobs:
           python-version: "3.11"
       - name: Install dependencies
         run: uv sync --extra dev --extra ml --extra deploy --extra serve --extra ui
-      # mypy and the heavy tests need the full dependency set (model code, ONNX
-      # runtime and the service/UI modules).
       - name: Type check
         run: uv run mypy
-      - name: Heavy tests
-        run: uv run pytest -m ml
+      - name: Heavy tests with coverage gate
+        run: uv run pytest --cov --cov-report=term-missing --cov-fail-under=85
+      - name: Dependency audit
+        run: uv run pip-audit
+
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build API image
+        run: docker build --target api -t castinspect-api:ci .
+      - name: Build UI image
+        run: docker build --target ui -t castinspect-ui:ci .
