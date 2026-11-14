@@ -33,14 +33,23 @@ ONNX behind a validated API.
 1. Download the Kaggle dataset "Casting product image data for quality inspection"
    (`ravirajsinh45/real-life-industrial-dataset-of-casting-product`) and place the archive
    in `data/raw/`.
-2. Build and run the stack (needs Docker):
+2. Train the final model and export it. Trained weights are not committed, so the
+   checkpoint at `artifacts/models/efficientnet_b0_final.pt` has to be produced once:
 
    ```bash
+   uv sync --extra ml --extra deploy
+   make data                        # verify and process the archive
+   uv run castinspect train-final configs/models/efficientnet_b0.yaml
    uv run castinspect export        # writes artifacts/onnx/efficientnet_b0.onnx
+   ```
+
+3. Build and run the stack (needs Docker):
+
+   ```bash
    docker compose up --build
    ```
 
-3. Open the inspection station at `http://localhost:8501`; the API is at
+4. Open the inspection station at `http://localhost:8501`; the API is at
    `http://localhost:8000` (`/health`, `/inspect`, `/metrics`).
 
 ## Installation (developers)
@@ -53,6 +62,9 @@ make test          # fast tests
 make test-ml       # heavy tests (model, ONNX, service)
 make data          # verify and process the dataset (after placing the archive)
 make cov           # coverage
+make export        # ONNX export from the final checkpoint
+make serve         # API on :8000
+make ui            # inspection station on :8501
 ```
 
 Reproduce the pipeline:
